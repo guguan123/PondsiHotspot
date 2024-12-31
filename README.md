@@ -1,7 +1,7 @@
 # PondsiHotspot
 一个用于在Windows 10+开启热点的脚本
 
-## tools/pondsihotspot.ps1
+## pondsihotspot.ps1
 
 一个可以开启/关闭电脑 WiFi 热点的 PowerShell 脚本
 需要以管理员权限运行
