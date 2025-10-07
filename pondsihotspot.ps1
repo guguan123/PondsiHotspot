@@ -66,6 +66,7 @@ function Test-AdministratorRights {
     }
     return $IsAdmin
 }
+$IsAdmin = Test-AdministratorRights   # 当前是否以管理员的方式运行
 
 # 等待异步操作完成的函数
 Function Await($WinRtTask, $ResultType) { 
@@ -91,35 +92,41 @@ function Get-WifiAdapterStatus {
         Write-Output "No wireless network adapter found."
     }
 }
-
-# 查看WiFi热点状态（该功能未完善！）
-function Get-WiFiHotspotStatus {
-    if ($tetheringManager.TetheringOperationalState -eq 1) {
-        $tetheringConfiguration = $tetheringManager.GetCurrentTetheringConfiguration()
-        $passphrase = "Not accessible through API" # Windows API does not expose the hotspot password for security reasons
-        Write-Output "Hotspot Status: On, SSID: $($tetheringConfiguration.SSID), Password: $($passphrase)"
+# 检查WiFi网卡状态（改进后：返回适配器对象列表，支持多个）
+function Get-WifiAdapterStatus {
+    # 查找所有描述中包含 'Wireless' 的网络适配器
+    $wifiAdapters = Get-NetAdapter | Where-Object { $_.InterfaceDescription -like '*Wireless*' }
+    
+    if ($wifiAdapters.Count -gt 0) {
+        # 返回适配器对象列表
+        return $wifiAdapters
     } else {
-        Write-Output "Hotspot Status: Off"
+        # 如果没有找到适配器，返回 $null
+        return $null
     }
 }
 
-# 启用或禁用 WiFi 适配器的函数
+# 启用或禁用 WiFi 适配器的函数（改进后：处理所有找到的 WiFi 适配器）
 Function EnableDisableWiFiAdapter($enable) {
     try {
-        $wifiAdapter = Get-NetAdapter | Where-Object { $_.InterfaceDescription -like '*Wireless*' }  # 获取无线网络适配器
-        if ($wifiAdapter) {
-            if ($enable) {
-                Enable-NetAdapter -Name $wifiAdapter.Name -Confirm:$false  # 启用适配器
-            } else {
-                Disable-NetAdapter -Name $wifiAdapter.Name -Confirm:$false  # 禁用适配器
+        $wifiAdapters = Get-WifiAdapterStatus  # 获取所有无线网络适配器
+        
+        if ($null -ne $wifiAdapters) {
+            foreach ($adapter in $wifiAdapters) {
+                if ($enable) {
+                    Write-Output "Enabling wireless adapter: $($adapter.Name)"
+                    Enable-NetAdapter -Name $adapter.Name -Confirm:$false  # 启用适配器
+                } else {
+                    Write-Output "Disabling wireless adapter: $($adapter.Name)"
+                    Disable-NetAdapter -Name $adapter.Name -Confirm:$false  # 禁用适配器
+                }
             }
+            Write-Output "Operation completed for all wireless adapters."
         } else {
             Write-Output "Wireless adapter not found."  # 如果未找到适配器则显示消息并退出
-            exit
         }
     } catch {
         Write-Error "An error occurred while trying to enable/disable the wireless adapter: $_"  # 处理异常情况
-        exit
     }
 }
 
@@ -138,40 +145,37 @@ Function ManageHotspot($enable) {
     }
 }
 
-# 设置全局变量
-$IsAdmin = Test-AdministratorRights   # 当前是否以管理员的方式运行
-
-# 检查 Windows Runtime API 是否可用
-$apiAvailable = $true
-try {
-    if ($IsAdmin) {
-        Add-Type -AssemblyName System.Runtime.WindowsRuntime  # 加载 Windows Runtime 程序集
-        # 获取 AsTask 方法
-        $asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0]
-    }
-    $connectionProfile = [Windows.Networking.Connectivity.NetworkInformation,Windows.Networking.Connectivity,ContentType=WindowsRuntime]::GetInternetConnectionProfile()  # 获取网络连接配置文件
-    if ($null -eq $connectionProfile) { 
-        throw "No internet connection profile found. Please check your network connection."
-    } # 如果找不到连接配置文件，则抛出异常
-    $tetheringManager = [Windows.Networking.NetworkOperators.NetworkOperatorTetheringManager,Windows.Networking.NetworkOperators,ContentType=WindowsRuntime]::CreateFromConnectionProfile($connectionProfile)  # 创建网络热点管理器
-    if ($null -eq $tetheringManager) {
-        throw "Failed to create tethering manager."
-    }
-} catch {
-    $apiAvailable = $false
-    Write-Warning "Windows Runtime API for networking is not available: $_"
-    if (!$Force) {
-        Exit 1
+# 需要 Windows Runtime API 的操作，检测是否可用
+if ($EnableHotspot -or $DisableHotspot -or ($PSBoundParameters.Count -eq 0 -and [string]::IsNullOrWhiteSpace($args))) {
+    # 检查 Windows Runtime API 是否可用
+    $apiAvailable = $true
+    try {
+        if ($IsAdmin) {
+            Add-Type -AssemblyName System.Runtime.WindowsRuntime  # 加载 Windows Runtime 程序集
+            # 获取 AsTask 方法
+            $asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0]
+        }
+        $connectionProfile = [Windows.Networking.Connectivity.NetworkInformation,Windows.Networking.Connectivity,ContentType=WindowsRuntime]::GetInternetConnectionProfile()  # 获取网络连接配置文件
+        if ($null -eq $connectionProfile) { 
+            throw "No internet connection profile found. Please check your network connection."
+        }
+        $tetheringManager = [Windows.Networking.NetworkOperators.NetworkOperatorTetheringManager,Windows.Networking.NetworkOperators,ContentType=WindowsRuntime]::CreateFromConnectionProfile($connectionProfile)  # 创建网络热点管理器
+    } catch {
+        $apiAvailable = $false
+        Write-Warning "Windows Runtime API for networking is not available: $_"
     }
 }
 
 # 解析命令行参数并执行相应操作
-# 检查参数是否包含帮助开关
-if ($Version) {
-    Write-Output "pondsihotspot.ps1 v0.4"
-    Write-Output "Last changed on 2022-4-12"
-}
-elseif ($Help) {
+if ($args.Count -gt 0) { # --- 检查是否有未捕获的位置参数（未知选项） ---
+    $scriptFileName = Split-Path -Path $MyInvocation.MyCommand.Name -Leaf
+    # 报告未知的（位置）参数
+    Write-Output "$($scriptFileName): unknown option(s) provided: $($args -join ', ')"
+    Exit 1
+} if ($Version) {
+    Write-Output "pondsihotspot.ps1 v0.5"
+    Write-Output "Last changed on 2025-10-07"
+} if ($Help) {
     # 使用$MyInvocation.MyCommand.Name获取当前脚本文件的完整路径；使用Split-Path获取文件名部分
     $scriptFileName = Split-Path -Path $MyInvocation.MyCommand.Name -Leaf
     # Output help information
@@ -198,24 +202,40 @@ elseif ($Help) {
     Write-Output "    Displays the version of $($scriptFileName). Additional parameters are ignored."
     Write-Output ""
     Write-Output "If no input parameters are provided, it automatically toggles the hotspot."
-}
-elseif ($CheckAdapterStatus) {Get-WifiAdapterStatus}
-elseif ($CheckHotspotStatus) { 
-    if ($apiAvailable) {
-        Get-WiFiHotspotStatus
+
+} if ($CheckAdapterStatus) {
+    $status = Get-WifiAdapterStatus
+    if ($null -ne $status) {
+        Write-Output "--- Wireless Adapter Status ---"
+        $status | Select-Object Name, InterfaceDescription, Status, State, LinkSpeed | Format-Table -AutoSize
     } else {
-        Write-Warning "Cannot check hotspot status due to unavailable API."
+        Write-Output "No wireless network adapter found."
     }
-}
-elseif ($EnableAdapter) {
+
+} if ($EnableAdapter) {
     if ($IsAdmin) {
         EnableDisableWiFiAdapter $true
     } else {
         Write-Error "The script requires administrator privileges to run!"
         Exit 1
     }
-}
-elseif ($EnableHotspot) {
+
+} if ($DisableAdapter) {
+    if ($IsAdmin) {
+        EnableDisableWiFiAdapter $false
+    } else {
+        Write-Error "The script requires administrator privileges to run!"
+        Exit 1
+    }
+
+} if ($CheckHotspotStatus) { 
+    if ($apiAvailable) {
+        Write-Output "--- Hotspot Status ---"
+        $tetheringManager.TetheringOperationalState | Format-List  # 或者 Format-Table，取决于你想要的输出格式
+    } else {
+        Write-Error "Cannot check hotspot status due to unavailable API."
+    }
+} if ($EnableHotspot) {
     if ($IsAdmin) {
         if ($EnableAdapter) {
             Start-Sleep -Seconds 5  # 如果还附带有"-EnableAdapter"开关就等待5秒钟以确保适配器启用
@@ -223,34 +243,29 @@ elseif ($EnableHotspot) {
         if ($apiAvailable) {
             ManageHotspot $true
         } else {
-            Write-Warning "Cannot enable hotspot due to unavailable API."
+            Write-Error "Cannot enable hotspot due to unavailable API."
+            Exit 1
         }
     } else {
         Write-Error "The script requires administrator privileges to run!"
         Exit 1
     }
-}
-elseif ($DisableHotspot) {
+
+} if ($DisableHotspot) {
     if ($IsAdmin) {
         if ($apiAvailable) {
             ManageHotspot $false
         } else {
-            Write-Warning "Cannot disable hotspot due to unavailable API."
+            Write-Error "Cannot disable hotspot due to unavailable API."
+            Exit 1
         }
     } else {
         Write-Error "The script requires administrator privileges to run!"
         Exit 1
     }
-}
-elseif ($DisableAdapter) {
-    if ($IsAdmin) {
-        EnableDisableWiFiAdapter $false
-    } else {
-        Write-Error "The script requires administrator privileges to run!"
-        Exit 1
-    }
-}
-elseif (-not $args) {
+
+# $PSBoundParameters 包含所有已绑定的命名参数的哈希表
+} if ($PSBoundParameters.Count -eq 0 -and [string]::IsNullOrWhiteSpace($args)) {
     if ($IsAdmin) {
         # 如果没有给出直接的命令，则根据当前状态执行默认操作
         if ($apiAvailable) {
@@ -270,9 +285,4 @@ elseif (-not $args) {
         Write-Error "The script requires administrator privileges to run!"
         Exit 1
     }
-}
-elseif ($args) {
-    $scriptFileName = Split-Path -Path $MyInvocation.MyCommand.Name -Leaf
-    Write-Output "$($scriptFileName): unknown option $($args)"
-    Exit 1
 }
